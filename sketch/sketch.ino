@@ -6,8 +6,18 @@ int EPROM_VCC = 44;
 
 // current data bus direction
 typedef enum { DATA_IN, DATA_OUT } data_bus_direction_t;
-
 data_bus_direction_t data_bus_dir;
+
+/* Current command */
+#define CMDLEN 16
+char cmdbuf[CMDLEN + 1];
+
+#define DATALEN 1024
+uint8_t databuf[DATALEN];
+uint16_t dataused;
+
+/* Pointer to next operand */
+uint8_t cmdptr;
 
 
 void setup() {
@@ -31,6 +41,8 @@ void setup() {
   // Allow time for voltages to settle
   delay(100);
   Serial.begin(19200);
+
+  dataused = 0;
   
 }
 
@@ -96,16 +108,6 @@ void data_bus_write(unsigned int val) {
   PORTL &= ~_BV(0); // 11
   PORTL |= (val & (1 << 11)) >> 11; // PL0
 }
-
-/* Current command */
-#define CMDLEN 16
-char cmdbuf[CMDLEN + 1];
-
-#define DATALEN 1024
-uint8_t databuf[DATALEN];
-
-// Pointer to next operand
-uint8_t cmdptr;
 
 
 uint32_t getCmdAddr(uint8_t pos) {
@@ -186,6 +188,44 @@ void doWriteCmd() {
   digitalWrite(EPROM_VPP, LOW);
   digitalWrite(EPROM_VCC, LOW);
   delay(100); 
+}
+
+uint8_t getDataBuffer(uint16_t size) {
+  dataused = 0;
+  uint16_t timeout = 0;
+  while (1) {
+    if (Serial.available()) {
+      timeout = 0;
+      int c = Serial.read();
+      databuf[dataused++] = c;
+      if (dataused == DATALEN || dataused == size) {
+        return 0;
+      }
+    } else {
+      delay(10);
+      if (timeout++ == 1000) {
+        dataused = 0;
+        return 1;
+      }
+    }
+  }  
+}
+
+void doBufferCmd() {
+  uint16_t size = getCmdAddr(cmdptr);
+  if (size > DATALEN) {
+    size = DATALEN;
+  }
+  Serial.print("# BUFFER ");
+  Serial.println(size, DEC);
+  Serial.println("READY");
+  uint8_t result = getDataBuffer(size);
+  if (result == 0) {
+    Serial.print("OK ");
+    Serial.println(dataused, DEC);
+  } else {
+    Serial.println("ERROR");
+  }
 }
 
 void getCommand() {
