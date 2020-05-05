@@ -12,8 +12,8 @@ data_bus_direction_t data_bus_dir;
 #define CMDLEN 16
 char cmdbuf[CMDLEN + 1];
 
-#define DATALEN 1024
-uint8_t databuf[DATALEN];
+#define DATALEN 512
+uint16_t databuf[DATALEN];
 uint16_t dataused;
 
 /* Pointer to next operand */
@@ -109,6 +109,20 @@ void data_bus_write(unsigned int val) {
   PORTL |= (val & (1 << 11)) >> 11; // PL0
 }
 
+/* Be cafeul not to call this without setting the data bus direction first. */
+uint16_t read_eprom(uint32_t addr) {
+    set_address(addr);
+    delay(1);
+    digitalWrite(EPROM_CE, LOW);
+    delay(1);
+    digitalWrite(EPROM_OE, LOW);
+    delay(1);
+    uint16_t d = data_bus_value();
+  
+    digitalWrite(EPROM_CE, HIGH);
+    digitalWrite(EPROM_OE, HIGH);
+    return d;
+}
 
 uint32_t getCmdAddr(uint8_t pos) {
   while (cmdbuf[pos] == ' ') {
@@ -141,20 +155,11 @@ void doReadCmd() {
   data_bus_direction(DATA_IN);
   
   for (uint32_t addr = start; addr < start + len; addr++) {
-    set_address(addr);
-    delay(1);
-    digitalWrite(EPROM_CE, LOW);
-    delay(1);
-    digitalWrite(EPROM_OE, LOW);
-    delay(1);
-    unsigned int d = data_bus_value();
-  
-    digitalWrite(EPROM_CE, HIGH);
-    digitalWrite(EPROM_OE, HIGH);
+    uint16_t val = read_eprom(addr);
 
     Serial.print(addr, HEX);
     Serial.print(": ");
-    Serial.println(d, HEX);
+    Serial.println(val, HEX);
   }    
 }
 
@@ -192,12 +197,20 @@ void doWriteCmd() {
 
 uint8_t getDataBuffer(uint16_t size) {
   dataused = 0;
+  uint16_t bytecount = 0;
+  uint16_t lastbyte;
   uint16_t timeout = 0;
   while (1) {
     if (Serial.available()) {
       timeout = 0;
       int c = Serial.read();
-      databuf[dataused++] = c;
+
+      if (bytecount++ % 2 == 0) {
+        lastbyte = c;
+      } else {
+        databuf[dataused++] = (lastbyte << 8) | c;
+      }
+      
       if (dataused == DATALEN || dataused == size) {
         return 0;
       }
@@ -226,6 +239,91 @@ void doBufferCmd() {
   } else {
     Serial.println("ERROR");
   }
+}
+
+void doProgramCmd() {
+  uint32_t addr = getCmdAddr(cmdptr);
+  uint32_t size = getCmdAddr(cmdptr);
+  Serial.print("# PROGRAM ");
+  Serial.print(addr, DEC);
+  Serial.print(", ");
+  Serial.println(size, DEC);
+
+  if (size == 0) {
+    return;
+  }
+
+  data_bus_direction(DATA_OUT);
+  digitalWrite(EPROM_VCC, HIGH);
+  digitalWrite(EPROM_VPP, HIGH);
+  delay(10);
+
+  for (uint32_t count = 0; count < size; count++) {
+    set_address(addr + count);
+    data_bus_write(databuf[count]);
+  
+    // Wait for tAS, tDS, tVPS, tVCS (uS)
+    _delay_us(10);
+  
+    // Pulse CE for exactly 50uS
+    digitalWrite(EPROM_CE, LOW);
+    _delay_us(50);
+    digitalWrite(EPROM_CE, HIGH);
+  
+    // Wait for tDH (data hold time)
+    _delay_us(2);
+  }
+
+  // Can now lower programming voltages and let them settle
+  digitalWrite(EPROM_VPP, LOW);
+  digitalWrite(EPROM_VCC, LOW);
+  delay(100); 
+}
+
+// This algorithm doesn't seem to match anything online, but I couldn't figure out what the difference is.
+#define CRC_POLY 0x3D65
+uint16_t crc16(uint16_t crc, uint8_t b) 
+{
+  crc ^= ((uint16_t)b) << 8;
+  for (uint8_t i = 0; i < 8; i++) {
+    if ((crc & 0x8000) != 0) {
+      crc = (crc << 1) ^ CRC_POLY;
+    } else {
+      crc <<= 1;
+    }
+  }
+  return crc;
+}
+
+void doCRCCmd() {
+  uint32_t start = getCmdAddr(cmdptr);
+  uint32_t size = getCmdAddr(cmdptr);
+
+  data_bus_direction(DATA_IN);
+  uint16_t crc = 0;
+  for (uint32_t addr = start; addr < start + size; addr++) {
+    uint16_t operand = read_eprom(addr);
+    crc = crc16(crc, operand >> 8);
+    crc = crc16(crc, operand & 0xff);
+  }
+  
+  Serial.print("# CRC ");
+  Serial.print(start);
+  Serial.print(" ");
+  Serial.print(size);
+  Serial.print(" ");
+  Serial.println(crc, HEX);
+}
+
+void doShowCmd() {
+  Serial.print("# SHOW ");
+  Serial.println(dataused, DEC);  
+  
+  for (uint32_t addr = 0; addr < dataused; addr++) {
+    Serial.print(addr, HEX);
+    Serial.print(": ");
+    Serial.println(databuf[addr], HEX);
+  } 
 }
 
 void getCommand() {
@@ -262,6 +360,19 @@ void doCommand() {
       // Write block of data into buffer
       cmdptr++;
       doBufferCmd();
+      break;
+    case 'p':
+      // Program from buffer
+      cmdptr++;
+      doProgramCmd();
+      break;
+    case 'c':
+      cmdptr++;
+      doCRCCmd();
+      break;
+    case 's':
+      cmdptr++;
+      doShowCmd();
       break;
     default:
       Serial.print("Command ");
