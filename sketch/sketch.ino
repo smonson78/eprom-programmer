@@ -101,8 +101,9 @@ void data_bus_write(unsigned int val) {
   PORTH &= ~(_BV(3) | _BV(4) | _BV(5) | _BV(6)); // 3, 4, 5, 6
   PORTH |= val & (_BV(3) | _BV(4) | _BV(5) | _BV(6)); // PH3-6
 
-  PORTB &= 0xff; // all bits in port B are used in d15, 14, 13, 12, 7, 8, 9, 10
-  PORTB |= ((val & (1 << 7)) >> 3) | ((val & (1 << 8)) >> 3) | ((val & (1 << 9)) >> 3) | ((val & (1 << 10)) >> 3)
+  //PORTB = 0; // all bits in port B are used in d15, 14, 13, 12, 7, 8, 9, 10
+  // the above was replaced with a direct setting of the port, below
+  PORTB = ((val & (1 << 7)) >> 3) | ((val & (1 << 8)) >> 3) | ((val & (1 << 9)) >> 3) | ((val & (1 << 10)) >> 3)
     | ((val & (1 << 12)) >> 9) | ((val & (1 << 13)) >> 11) | ((val & (1 << 14)) >> 13) | ((val & (1 << 15)) >> 15);
   
   PORTL &= ~_BV(0); // 11
@@ -315,6 +316,18 @@ void doCRCCmd() {
   Serial.println(crc, HEX);
 }
 
+void doDebugCmd() {
+  Serial.print("# buffer contains ");
+  Serial.print(dataused, 10);
+  Serial.println(" words.");
+  for (uint16_t i = 0; i < dataused; i++) {
+    Serial.print(i, 16);
+    Serial.print(": ");
+    Serial.println(databuf[i], 16);
+  }
+}
+
+
 void doShowCmd() {
   Serial.print("# SHOW ");
   Serial.println(dataused, DEC);  
@@ -342,6 +355,7 @@ void getCommand() {
   cmdbuf[pos] = '\0';
   cmdptr = 0;
 }
+
 
 void doCommand() {
   switch (cmdbuf[0]) {
@@ -373,6 +387,10 @@ void doCommand() {
     case 's':
       cmdptr++;
       doShowCmd();
+      break;
+    case 'd':
+      cmdptr++;
+      doDebugCmd();
       break;
     default:
       Serial.print("Command ");

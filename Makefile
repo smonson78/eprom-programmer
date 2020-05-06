@@ -5,5 +5,5 @@ LDLIBS=-lserialport
 
 TARGET=epromburn
 
-$(TARGET): main.o
+$(TARGET): main.o crc16.o
 	$(CC) $(LDFLAGS) $^ $(LOADLIBES) $(LDLIBS) -o $@

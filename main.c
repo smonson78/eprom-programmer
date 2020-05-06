@@ -5,22 +5,26 @@
 #include <unistd.h>
 #include <libserialport.h>
 
-char *serial_port = "/dev/ttyACM0";
+#include "crc16.h"
 
+// Serial-port-related globals
+char *serial_port = "/dev/ttyACM0";
 typedef struct sp_port sp_port_t;
 typedef struct sp_port_config sp_port_config_t;
 typedef enum sp_return sp_return_t;
-
 sp_port_t *port;
 
+// Functionality-related globals
 uint32_t program_addr;
 #define BUFSIZE 128
 char input_buf[BUFSIZE];
 char read_buf[BUFSIZE];
+int read_flag;
+
+//#define DEBUG
 
 /* Read a line of text up to the first CR (or timeout) */
-int get_response(int timeout)
-{
+int get_response(int timeout) {
     sp_return_t result;
     int pos = 0;
     char c;
@@ -40,16 +44,14 @@ int get_response(int timeout)
     } while (c != '\n');
 
     input_buf[pos] = '\0';
+#ifdef DEBUG
     printf("<-- [%s]\n", input_buf);
+#endif
     return 1;
 }
 
 // Wait for ? prompt
-int handshake()
-{
-    //sp_nonblocking_write(port, "##", 2);
-    //sp_drain(port);
-
+int get_prompt() {
     get_response(500);
     
     if (strcmp(input_buf, "?") == 0) {
@@ -58,56 +60,39 @@ int handshake()
     return 0;
 }
 
-void show_debug()
-{
-    while (1)
-    {
-        char buf[16];
-        int result = sp_blocking_read(port, buf, 1, 500);
-        if (result == 0)
-        {
-            break;
-        }
-        printf("%c", buf[0]);
-    }
-    printf("\n");
-}
-
-void wait_for_response()
-{
-    if (!get_response(200))
-    {
+void wait_for_response() {
+    if (!get_response(2000)) {
         fprintf(stderr, "No response from device.\n");
-        show_debug();
         exit(5);
     } 
 
-    if (input_buf[0] != '#')
-    {
+    if (input_buf[0] != '#') {
         fprintf(stderr, "Unexpected response: %s\n", input_buf);
-        show_debug();
         exit(5);
     }
 }
 
-void send_command(const char *command)
-{
+void send_command(const char *command) {
+#ifdef DEBUG
     printf("--> %s\n", command);
+#endif
     sp_nonblocking_write(port, command, strlen(command));
     sp_nonblocking_write(port, "\n", 1);
     sp_drain(port);
     wait_for_response();
-    // printf("<-- %s\n", input_buf);
+#ifdef DEBUG
+    printf("<-- %s\n", input_buf);
+#endif
 }
 
-int do_parameters(int argc, char **argv)
-{
+int do_parameters(int argc, char **argv) {
     int c;
     
     // Defaults
     program_addr = 0;
+    read_flag = 0;
         
-    while ((c = getopt(argc, argv, "a:s:")) != -1)
+    while ((c = getopt(argc, argv, "a:s:r")) != -1)
     {
         switch (c)
         {
@@ -117,27 +102,33 @@ int do_parameters(int argc, char **argv)
             case 's':
                 serial_port = optarg;
                 break;
+            case 'r':
+                read_flag = 1;
+                break;
         }
     }
     
     return optind;
 }
 
-// TODO: finish
 void do_read(uint8_t *read_buf, uint32_t read_addr, uint32_t size) {
     /* Send read command */
     char buf[32];
     sprintf(buf, "r %d %d", read_addr, size);
     send_command(buf);
 
-    /* Display response */
+    /* Store response */
     int expected_addr = read_addr;
+    uint32_t byte = 0;
     do {
         get_response(500);
 
-        char *next = input_buf;
+        char *next;
         int addr = strtol(input_buf, &next, 16);
-        if (*next == ':') {
+        while (*next == ':') {
+            next++;
+        }
+        while (*next == ' ') {
             next++;
         }
         int value = strtol(next, 0, 16);
@@ -147,6 +138,9 @@ void do_read(uint8_t *read_buf, uint32_t read_addr, uint32_t size) {
             exit(1);
         }
         //printf("read addr: %d, val %04x\n", addr, value);
+
+        read_buf[byte++] = value >> 8;
+        read_buf[byte++] = value & 0xff;
         expected_addr++;
     } while (expected_addr < read_addr + size);
 }    
@@ -185,7 +179,7 @@ void do_buffer(uint8_t *send_buf, uint32_t size) {
     get_response(500);
 }    
 
- // Program from buffer to EPROM, size is in words
+// Program from buffer to EPROM, size is in words
 void do_program(uint32_t addr, uint32_t size) {
     /* Send buffer command */
     char buf[32];
@@ -200,8 +194,51 @@ void do_program(uint32_t addr, uint32_t size) {
         fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
         exit(1);      
     }
-}    
+}
 
+// Program from buffer to EPROM, size is in words
+uint16_t do_crc(uint32_t addr, uint32_t size) {
+    /* Send buffer command */
+    char buf[32];
+    sprintf(buf, "c %d %d", addr, size);
+    send_command((const char *)buf);
+
+    if (strncmp(input_buf, "# CRC ", 6) != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+    char *next = input_buf + 6;
+    uint32_t response_addr = strtol(next, &next, 10);
+    while (*next == ' ') {
+        next++;
+    }
+    uint32_t response_size = strtol(next, &next, 10);
+    while (*next == ' ') {
+        next++;
+    }
+    uint32_t response_crc = strtol(next, 0, 16);
+
+    if (response_addr != addr || response_size != size) {
+        fprintf(stderr, "CRC command returned incorrect result: [%s]\n", input_buf);
+        exit(1);      
+    }
+
+    get_response(200);   
+   
+    if (strcmp(input_buf, "?") != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+    return response_crc;
+}
+
+uint16_t calc_crc16(uint8_t *block, uint32_t size) {
+  uint16_t crc = 0;
+  for (uint32_t addr = 0; addr < size; addr++) {
+    crc = crc16(crc, block[addr]);
+  }
+  return crc;
+}
 
 int main(int argc, char **argv)
 {
@@ -212,6 +249,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "\nusage: %s [options] imagefilename\n", argv[0]);
         fprintf(stderr, "\n\t-a address:\tAddress in EPROM device to begin programming\n");
         fprintf(stderr, "\n\t-s serialdev:\tSerial port device\n");
+        fprintf(stderr, "\n\t-r Read from EPROM to file instead of the other way around\n");
         fprintf(stderr, "\n");
         
         exit(1); 
@@ -224,8 +262,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "Couldn't load %s.\n", filename);
         exit(1);
     }
-
-    //const uint32_t filelen = 4 / 2; // in words
 
 	sp_return_t result = sp_get_port_by_name(serial_port, &port);
 	if (result != SP_OK)
@@ -267,31 +303,64 @@ int main(int argc, char **argv)
         printf("Received %c\n", input_buf[0]);
     }
     
-    // Wait for handshake
-    printf("# Attempting handshake...\n");
+    // Wait for prompt
+    printf("# Waiting for device...\n");
 
     // You have to wait an age for Arduinos to wake up
     usleep(2000000);
 
-    if (!handshake())
+    if (!get_prompt())
     {
-        fprintf(stderr, "Didn't receive handshake.\n");
+        fprintf(stderr, "Didn't see prompt.\n");
         exit(4);
     }
 
-    printf("# Got handshake.\n");
+    printf("# Got prompt.\n");
+
+    // Find file size
+    fseek(infile, 0, SEEK_END);    
+    size_t infile_size = ftell(infile);
+    rewind(infile);
+
+    printf("ROM file is %lu bytes.\n", infile_size);
+    printf("Programming %lu bytes at ROM address 0x%06x.\n", infile_size, program_addr);
 
     uint8_t file_buf[1024];
-    size_t read_result = fread(file_buf, 4, 1, infile);
-    if (read_result != 1) {
-        fprintf(stderr, "Couldn't read input file!\n");
-        exit(1);
-    }
+    uint32_t end_addr = program_addr + infile_size;
+    uint32_t block_addr = program_addr;
+    while (block_addr < program_addr + infile_size) {
+        uint32_t block_size = end_addr - block_addr > 256 ? 256 : end_addr - block_addr;
+        uint32_t num_words = block_size / 2;
+        uint32_t addr_words = block_addr / 2;
+        
+        printf("Programming block of size %d at ROM address 0x%06x...\n", block_size, block_addr);
 
-    do_buffer(file_buf, 2);
-    do_program(10, 2);
+        // Get the next block of data from disk
+        size_t read_result = fread(file_buf, block_size, 1, infile);
+        if (read_result != 1) {
+            fprintf(stderr, "Couldn't read input file!\n");
+            exit(1);
+        }
+
+        uint16_t block_crc = calc_crc16(file_buf, block_size);
+
+        do_buffer(file_buf, num_words);
+        do_program(addr_words, num_words);
+        uint16_t crc = do_crc(addr_words, num_words);
+        if (crc != block_crc) {
+            fprintf(stderr, "Mismatching CRC16: %04x (EPROM) vs %04x (file)\n", crc, block_crc);
+            exit(1);
+        }
+
+        block_addr += block_size;
+    }
+    /*
+
+
+
 
     do_read(file_buf, 0, 16);
+*/
 
     fclose(infile);
 	sp_close(port);
