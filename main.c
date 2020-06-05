@@ -16,6 +16,8 @@ sp_port_t *port;
 
 // Functionality-related globals
 uint32_t program_addr;
+uint32_t program_end_addr;
+uint32_t program_size;
 #define BUFSIZE 128
 char input_buf[BUFSIZE];
 char read_buf[BUFSIZE];
@@ -90,20 +92,28 @@ int do_parameters(int argc, char **argv) {
     
     // Defaults
     program_addr = 0;
+    program_end_addr = -1;
+    program_size = -1;
     read_flag = 0;
         
-    while ((c = getopt(argc, argv, "a:s:r")) != -1)
+    while ((c = getopt(argc, argv, "a:s:z:e:r")) != -1)
     {
         switch (c)
         {
             case 'a':
                 program_addr = atoi(optarg);
                 break;
-            case 's':
-                serial_port = optarg;
+            case 'e':
+                program_end_addr = atoi(optarg);
                 break;
             case 'r':
                 read_flag = 1;
+                break;
+            case 's':
+                serial_port = optarg;
+                break;
+            case 'z':
+                program_size = atoi(optarg);
                 break;
         }
     }
@@ -143,6 +153,15 @@ void do_read(uint8_t *read_buf, uint32_t read_addr, uint32_t size) {
         read_buf[byte++] = value & 0xff;
         expected_addr++;
     } while (expected_addr < read_addr + size);
+
+    /* Display response */
+    get_response(500);
+
+    // Wait for READY
+    if (strcmp(input_buf, "?") != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }    
 }    
 
 // Size is in words
@@ -240,6 +259,100 @@ uint16_t calc_crc16(uint8_t *block, uint32_t size) {
   return crc;
 }
 
+void write_from_file(const char *filename) {
+    FILE *infile = fopen(filename, "rb");
+    if (infile == 0)
+    {
+        fprintf(stderr, "Couldn't load %s.\n", filename);
+        exit(1);
+    }
+
+    // Find file size
+    fseek(infile, 0, SEEK_END);    
+    size_t infile_size = ftell(infile);
+    rewind(infile);
+
+    printf("ROM file is %lu bytes.\n", infile_size);
+    printf("Programming %lu bytes at ROM address 0x%06x.\n", infile_size, program_addr);
+
+    uint8_t file_buf[1024];
+    uint32_t end_addr = program_addr + infile_size;
+    uint32_t block_addr = program_addr;
+    while (block_addr < end_addr) {
+        uint32_t block_size = end_addr - block_addr > 512 ? 512 : end_addr - block_addr;
+        uint32_t num_words = block_size / 2;
+        uint32_t addr_words = block_addr / 2;
+        
+        printf("Programming block of size %d at ROM address 0x%06x...\n", block_size, block_addr);
+
+        // Get the next block of data from disk
+        size_t read_result = fread(file_buf, block_size, 1, infile);
+        if (read_result != 1) {
+            fprintf(stderr, "Couldn't read input file!\n");
+            exit(1);
+        }
+
+        uint16_t block_crc = calc_crc16(file_buf, block_size);
+
+        do_buffer(file_buf, num_words);
+        do_program(addr_words, num_words);
+        uint16_t crc = do_crc(addr_words, num_words);
+        if (crc != block_crc) {
+            fprintf(stderr, "Mismatching CRC16: %04x (EPROM) vs %04x (file)\n", crc, block_crc);
+            exit(1);
+        }
+
+        block_addr += block_size;
+    }
+
+    printf("Write complete.\n");
+    fclose(infile);
+}
+
+void read_to_file(const char *filename) {
+    FILE *outfile = fopen(filename, "wb");
+    if (outfile == 0)
+    {
+        fprintf(stderr, "Couldn't open file %s for writing.\n", filename);
+        exit(1);
+    }
+
+    uint8_t file_buf[1024];
+    uint32_t end_addr;
+    
+    if (program_end_addr == -1 && program_size == -1) {
+        fprintf(stderr, "No size (-e or -z) specified. Can't continue.\n");
+        exit(1);
+    } else if (program_end_addr != -1) {
+        end_addr = program_end_addr;
+    } else {
+        end_addr = program_addr + program_size;
+    }
+    
+    uint32_t block_addr = program_addr;
+    while (block_addr < end_addr) {
+        uint32_t block_size = end_addr - block_addr > 512 ? 512 : end_addr - block_addr;
+        uint32_t num_words = block_size / 2;
+        uint32_t addr_words = block_addr / 2;
+        
+        printf("Reading block of size %d at ROM address 0x%06x...\n", block_size, block_addr);
+
+        do_read(file_buf, addr_words, num_words);
+
+        // Write the block of data to disk
+        size_t write_result = fwrite(file_buf, block_size, 1, outfile);
+        if (write_result != 1) {
+            fprintf(stderr, "Couldn't write output file!\n");
+            exit(1);
+        }
+
+        block_addr += block_size;
+    }
+
+    printf("Read complete.\n");
+    fclose(outfile);
+}
+
 int main(int argc, char **argv)
 {
     int lastopt = do_parameters(argc, argv);
@@ -250,17 +363,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "\n\t-a address:\tAddress in EPROM device to begin programming\n");
         fprintf(stderr, "\n\t-s serialdev:\tSerial port device\n");
         fprintf(stderr, "\n\t-r Read from EPROM to file instead of the other way around\n");
+        fprintf(stderr, "\n\t-e Set end address\n");
+        fprintf(stderr, "\n\t-z Set size of program zone\n");
         fprintf(stderr, "\n");
+        fprintf(stderr, "When reading, one of -s or -z is required.\n");
         
         exit(1); 
-    }
-
-    const char *filename = argv[lastopt];
-    FILE *infile = fopen(filename, "rb");
-    if (infile == 0)
-    {
-        fprintf(stderr, "Couldn't load %s.\n", filename);
-        exit(1);
     }
 
 	sp_return_t result = sp_get_port_by_name(serial_port, &port);
@@ -317,52 +425,17 @@ int main(int argc, char **argv)
 
     printf("# Got prompt.\n");
 
-    // Find file size
-    fseek(infile, 0, SEEK_END);    
-    size_t infile_size = ftell(infile);
-    rewind(infile);
+    const char *filename = argv[lastopt];
 
-    printf("ROM file is %lu bytes.\n", infile_size);
-    printf("Programming %lu bytes at ROM address 0x%06x.\n", infile_size, program_addr);
-
-    uint8_t file_buf[1024];
-    uint32_t end_addr = program_addr + infile_size;
-    uint32_t block_addr = program_addr;
-    while (block_addr < program_addr + infile_size) {
-        uint32_t block_size = end_addr - block_addr > 256 ? 256 : end_addr - block_addr;
-        uint32_t num_words = block_size / 2;
-        uint32_t addr_words = block_addr / 2;
-        
-        printf("Programming block of size %d at ROM address 0x%06x...\n", block_size, block_addr);
-
-        // Get the next block of data from disk
-        size_t read_result = fread(file_buf, block_size, 1, infile);
-        if (read_result != 1) {
-            fprintf(stderr, "Couldn't read input file!\n");
-            exit(1);
-        }
-
-        uint16_t block_crc = calc_crc16(file_buf, block_size);
-
-        do_buffer(file_buf, num_words);
-        do_program(addr_words, num_words);
-        uint16_t crc = do_crc(addr_words, num_words);
-        if (crc != block_crc) {
-            fprintf(stderr, "Mismatching CRC16: %04x (EPROM) vs %04x (file)\n", crc, block_crc);
-            exit(1);
-        }
-
-        block_addr += block_size;
+    if (read_flag == 0) {
+        write_from_file(filename);
+    } else {
+        read_to_file(filename);
     }
+
     /*
-
-
-
-
-    do_read(file_buf, 0, 16);
 */
 
-    fclose(infile);
 	sp_close(port);
     sp_free_config(conf);
 	sp_free_port(port);

@@ -68,7 +68,7 @@ void data_bus_direction(data_bus_direction_t dir) {
   }
 }
 
-void set_address(int addr) {
+void set_address(uint32_t addr) {
   for (int bit = 0; bit <= 17; bit++) {
     digitalWrite(EPROM_A0 + bit, (addr >> bit) & 1);
   }
