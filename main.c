@@ -22,6 +22,7 @@ uint32_t program_size;
 char input_buf[BUFSIZE];
 char read_buf[BUFSIZE];
 int read_flag;
+int check_blank_flag;
 
 //#define DEBUG
 
@@ -95,13 +96,17 @@ int do_parameters(int argc, char **argv) {
     program_end_addr = -1;
     program_size = -1;
     read_flag = 0;
+    check_blank_flag = 0;
         
-    while ((c = getopt(argc, argv, "a:s:z:e:r")) != -1)
+    while ((c = getopt(argc, argv, "a:s:z:e:rb")) != -1)
     {
         switch (c)
         {
             case 'a':
                 program_addr = atoi(optarg);
+                break;
+            case 'b':
+                check_blank_flag = 1;
                 break;
             case 'e':
                 program_end_addr = atoi(optarg);
@@ -353,21 +358,99 @@ void read_to_file(const char *filename) {
     fclose(outfile);
 }
 
+void check_blank() {
+
+    uint32_t end_addr;
+    if (program_end_addr == -1 && program_size == -1) {
+        fprintf(stderr, "No size (-e or -z) specified. Can't continue.\n");
+        exit(1);
+    } else if (program_end_addr != -1) {
+        end_addr = program_end_addr;
+    } else {
+        end_addr = program_size;
+    }
+
+    printf("Checking blankness of device of size %d...\n", end_addr);
+
+    /* Send check command */
+    char buf[32];
+    sprintf(buf, "l %d", end_addr / 2);
+    send_command((const char *)buf);
+    if (strncmp(input_buf, "# CHECK", 7) != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+
+    while(1) {
+        get_response(10000);
+
+        if (input_buf[0] == '#') {
+            break;
+        }
+
+        char *next;
+        int addr = strtol(input_buf, &next, 16);
+        while (*next == ':') {
+            next++;
+        }
+        while (*next == ' ') {
+            next++;
+        }
+        int value = strtol(next, 0, 16);
+
+        printf("Checked %d bytes, %d culmulative unblank bits\n", addr * 2, value);
+    }
+
+    if (strncmp(input_buf, "# BITS ", 7) != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+
+    char *next = input_buf + 7;
+    uint32_t response_size = strtol(next, &next, 10);
+    while (*next == ' ') {
+        next++;
+    }
+    uint32_t unblank_bits = strtol(next, 0, 16);
+
+    if (response_size != end_addr / 2) {
+        fprintf(stderr, "BITS command returned incorrect result: [%s]\n", input_buf);
+        fprintf(stderr, "%d %d %d\n", response_size, end_addr, unblank_bits);
+        exit(1);      
+    }
+
+    get_response(200);   
+   
+    if (strcmp(input_buf, "?") != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+
+    if (unblank_bits == 0) {
+        printf("Device is blank.\n\n");
+    } else {
+        printf("Device has %d unblank bits.\n\n", unblank_bits);
+    }
+}
+
+void usage(const char *callname) {
+    fprintf(stderr, "\nusage: %s [options] [imagefilename]\n", callname);
+    fprintf(stderr, "\t-a address\tAddress in EPROM device to begin programming\n");
+    fprintf(stderr, "\t-s serialdev\tSerial port device\n");
+    fprintf(stderr, "\t-r\t\tRead from EPROM to file instead of the other way around\n");
+    fprintf(stderr, "\t-e address\tSet end address\n");
+    fprintf(stderr, "\t-z size\t\tSet size of program zone\n");
+    fprintf(stderr, "\t-b\t\tCheck if device is blank\n\n");
+    fprintf(stderr, "When reading or checking blankness (-r or -b), one of -s or -z is required.\n\n");
+}
+
 int main(int argc, char **argv)
 {
     int lastopt = do_parameters(argc, argv);
 
-    if (argc == lastopt)
+    if (!check_blank_flag && argc == lastopt)
     {
-        fprintf(stderr, "\nusage: %s [options] imagefilename\n", argv[0]);
-        fprintf(stderr, "\n\t-a address:\tAddress in EPROM device to begin programming\n");
-        fprintf(stderr, "\n\t-s serialdev:\tSerial port device\n");
-        fprintf(stderr, "\n\t-r Read from EPROM to file instead of the other way around\n");
-        fprintf(stderr, "\n\t-e Set end address\n");
-        fprintf(stderr, "\n\t-z Set size of program zone\n");
-        fprintf(stderr, "\n");
-        fprintf(stderr, "When reading, one of -s or -z is required.\n");
-        
+        usage(argv[0]);
         exit(1); 
     }
 
@@ -427,14 +510,13 @@ int main(int argc, char **argv)
 
     const char *filename = argv[lastopt];
 
-    if (read_flag == 0) {
+    if (check_blank_flag) {
+        check_blank();
+    } else if (read_flag == 0) {
         write_from_file(filename);
     } else {
         read_to_file(filename);
     }
-
-    /*
-*/
 
 	sp_close(port);
     sp_free_config(conf);

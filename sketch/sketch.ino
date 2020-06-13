@@ -316,6 +316,38 @@ void doCRCCmd() {
   Serial.println(crc, HEX);
 }
 
+void doCheckBlankCmd() {
+  uint32_t size = getCmdAddr(cmdptr);
+
+  Serial.print("# CHECK ");
+  Serial.println(size);
+  
+  data_bus_direction(DATA_IN);
+  uint32_t bits = 0;
+  for (uint32_t addr = 0; addr < size; addr++) {
+    uint16_t operand = read_eprom(addr);
+
+    // Count non-blank bits
+    for (uint8_t bit = 0; bit < 16; bit++) {
+      if (~operand & (1<<bit)) {
+        bits++;
+      }
+    }
+
+    // Display progress
+    if (addr > 0 && addr % 1024 == 0) {
+      Serial.print(addr, HEX);
+      Serial.print(": ");
+      Serial.println(bits, HEX);
+    }
+  }
+  
+  Serial.print("# BITS ");
+  Serial.print(size);
+  Serial.print(" ");
+  Serial.println(bits);
+}
+
 void doDebugCmd() {
   Serial.print("# buffer contains ");
   Serial.print(dataused, 10);
@@ -384,6 +416,10 @@ void doCommand() {
       cmdptr++;
       doCRCCmd();
       break;
+    case 'l':
+      cmdptr++;
+      doCheckBlankCmd();
+      break;      
     case 's':
       cmdptr++;
       doShowCmd();
