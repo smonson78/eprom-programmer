@@ -1,12 +1,28 @@
-int EPROM_CE = 22;
-int EPROM_OE = 2;
-int EPROM_A0 = 23;
-int EPROM_VPP = 42;
-int EPROM_VCC = 44;
+int EPROM_CE = 2;
+int EPROM_OE = 3;
+int EPROM_A0 = 62;
+int EPROM_VPP = 7;
+int EPROM_VCC = 6;
+
+#define EPROM_DATA_LOW_PIN PINA
+#define EPROM_DATA_HIGH_PIN PINC
+#define EPROM_DATA_LOW_PORT PORTA
+#define EPROM_DATA_HIGH_PORT PORTC
+#define EPROM_DATA_LOW_DDR DDRA
+#define EPROM_DATA_HIGH_DDR DDRC
+
+int TRANSFERRING_LED = 54; // Arduino pin name A0
+
+// This adjustment is for inaccurancy in the voltage divider
+float analogue_scaling_factor = 1.0179;
 
 // current data bus direction
 typedef enum { DATA_IN, DATA_OUT } data_bus_direction_t;
 data_bus_direction_t data_bus_dir;
+
+// Current address page (everything but the lowest 8 bits)
+// This is to minimise the amount of time it takes to change addresses
+uint32_t addr_page;
 
 /* Current command */
 #define CMDLEN 16
@@ -19,6 +35,13 @@ uint16_t dataused;
 /* Pointer to next operand */
 uint8_t cmdptr;
 
+void led_on() {
+  digitalWrite(TRANSFERRING_LED, HIGH);
+}
+
+void led_off() {
+  digitalWrite(TRANSFERRING_LED, LOW);
+}
 
 void setup() {
   pinMode(EPROM_OE, OUTPUT);
@@ -26,13 +49,57 @@ void setup() {
   pinMode(EPROM_VCC, OUTPUT);
   pinMode(EPROM_VPP, OUTPUT);
 
+  pinMode(TRANSFERRING_LED, OUTPUT);
+
   // Address
-  for (int pin = EPROM_A0; pin <= EPROM_A0 + 17; pin++) {
-    pinMode(pin, OUTPUT);
-  }
+  // Least-significant eight lines, which are all in one port (PORTK)
+  //for (int pin = EPROM_A0; pin < EPROM_A0 + 8; pin++) {
+  //  pinMode(pin, OUTPUT);
+  //DDRK = 0xff;
+  pinMode(A8, OUTPUT);
+  pinMode(A9, OUTPUT);
+  pinMode(A10, OUTPUT);
+  pinMode(A11, OUTPUT);
+  pinMode(A12, OUTPUT);
+  pinMode(A13, OUTPUT);
+  pinMode(A14, OUTPUT);
+  pinMode(A15, OUTPUT);
+  
+  //}
+  // Upper lines
+  //for (int pin = 44; pin <= 53; pin++) {
+  //  pinMode(pin, OUTPUT);
+  //}
+  pinMode(53, OUTPUT);
+  pinMode(52, OUTPUT);
+  pinMode(51, OUTPUT);
+  pinMode(50, OUTPUT);
+  pinMode(49, OUTPUT);
+  pinMode(48, OUTPUT);
+  pinMode(47, OUTPUT);
+  pinMode(46, OUTPUT);
+  pinMode(45, OUTPUT);
+  pinMode(44, OUTPUT);
+  
+
+  // Address pins are:
+  // a0-a7 = 62-69 (PORTK)
+  // a8 = 53
+  // a9 = 52
+  // a10 = 51
+  // a11 = 50
+  // a12 = 49
+  // a13 = 48
+  // a14 = 47
+  // a15 = 46
+  // a16 = 45
+  // a17 = 44
+
+  addr_page = 0;
 
   data_bus_direction(DATA_IN);
 
+  // OE and CE are active-low
   digitalWrite(EPROM_OE, HIGH);
   digitalWrite(EPROM_CE, HIGH);
   digitalWrite(EPROM_VCC, LOW);
@@ -40,7 +107,7 @@ void setup() {
 
   // Allow time for voltages to settle
   delay(100);
-  Serial.begin(19200);
+  Serial.begin(57600);
 
   dataused = 0;
   
@@ -51,73 +118,77 @@ void data_bus_direction(data_bus_direction_t dir) {
   if (data_bus_dir == dir) {
     return;
   }
-  
-  int pinmode;
-  if (dir == DATA_IN) {
-    pinmode = INPUT;
-  } else {
-    pinmode = OUTPUT;
-  }
+
   data_bus_dir = dir;
-  
-  for (int pin = 3; pin <= 13; pin++) {
-    pinMode(pin, pinmode);
-  }
-  for (int pin = 49; pin <= 53; pin++) {
-    pinMode(pin, pinmode);
+
+  EPROM_DATA_LOW_DDR = dir == DATA_IN ? 0 : 0xff;
+  EPROM_DATA_HIGH_DDR = dir == DATA_IN ? 0 : 0xff;
+
+  // In order to disable pullups
+  if (dir == DATA_IN) {
+    EPROM_DATA_LOW_PORT = 0;
+    EPROM_DATA_HIGH_PORT = 0;
   }
 }
 
 void set_address(uint32_t addr) {
-  for (int bit = 0; bit <= 17; bit++) {
-    digitalWrite(EPROM_A0 + bit, (addr >> bit) & 1);
-  }
+  uint32_t new_addr_page = addr >> 8;
+
+  // Change to a new page if needed
+  //if (new_addr_page != addr_page) {
+    digitalWrite(53, addr & (1 << 8) ? HIGH : LOW);
+    digitalWrite(52, addr & (1 << 9) ? HIGH : LOW);
+    digitalWrite(51, addr & (1 << 10) ? HIGH : LOW);
+    digitalWrite(50, addr & (1 << 11) ? HIGH : LOW);
+    digitalWrite(49, addr & (1 << 12) ? HIGH : LOW);
+    digitalWrite(48, addr & (1 << 13) ? HIGH : LOW);
+    digitalWrite(47, addr & (1 << 14) ? HIGH : LOW);
+    digitalWrite(46, addr & (1 << 15) ? HIGH : LOW);
+    digitalWrite(45, addr & (1 << 16) ? HIGH : LOW);
+    digitalWrite(44, addr & (1 << 17) ? HIGH : LOW);
+    // TODO make this into a loop
+    
+    addr_page = new_addr_page;
+  //}
+
+  // a0 - a7
+  PORTK = addr & 0xff;
 }
 
 unsigned int data_bus_value() {
-  int acc = 0;
+  int acc;
 
-  acc |= (PINE >> 5) & 1; // bit 0
-  acc |= (PING >> 4) & (1 << 1); // bit 1
-  acc |= (PINE >> 1) & (1 << 2); // bit 2
-  acc |= PINH & ((1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)); // bit 3, 4, 5, 6
-  acc |= (PINB & ((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7))) << 3; // bit 7, 8, 9, 10
-  acc |= (PINL & 1) << 11; // bit 11
-  acc |= (PINB & (1 << 3)) << 9; // bit 12
-  acc |= (PINB & (1 << 2)) << 11; // bit 13
-  acc |= (PINB & (1 << 1)) << 13; // bit 14
-  acc |= (PINB & 1) << 15; // bit 15
+  acc = EPROM_DATA_HIGH_PIN;
+  acc <<= 8;
+  acc |= EPROM_DATA_LOW_PIN;
   
   return acc;
 }
 
 void data_bus_write(unsigned int val) {
-  PORTE &= ~(_BV(5) | _BV(3)); // 0, 2
-  PORTE |= ((val & 1) << 5) | ((val & (1 << 2)) << 1); // bit 0 = PE5; bit 2 = PE3
+  EPROM_DATA_HIGH_PORT = val >> 8;
+  EPROM_DATA_LOW_PORT = val & 0xff;
+}
 
-  PORTG &= ~_BV(5); // 1
-  PORTG |= (val & (1 << 1)) << 4; // bit 1 = PG5
-
-  PORTH &= ~(_BV(3) | _BV(4) | _BV(5) | _BV(6)); // 3, 4, 5, 6
-  PORTH |= val & (_BV(3) | _BV(4) | _BV(5) | _BV(6)); // PH3-6
-
-  //PORTB = 0; // all bits in port B are used in d15, 14, 13, 12, 7, 8, 9, 10
-  // the above was replaced with a direct setting of the port, below
-  PORTB = ((val & (1 << 7)) >> 3) | ((val & (1 << 8)) >> 3) | ((val & (1 << 9)) >> 3) | ((val & (1 << 10)) >> 3)
-    | ((val & (1 << 12)) >> 9) | ((val & (1 << 13)) >> 11) | ((val & (1 << 14)) >> 13) | ((val & (1 << 15)) >> 15);
-  
-  PORTL &= ~_BV(0); // 11
-  PORTL |= (val & (1 << 11)) >> 11; // PL0
+float getVppVoltage() {
+  float temp = analogRead(A2);
+  // 5V is the analogue input max scale
+  temp *= 5;
+  // 1/3.2 is the voltage divider factor (1K ohm / 2.2K ohm)
+  temp *= 3.2;
+  temp /= 1023;
+  temp *= analogue_scaling_factor;
+  return temp;
 }
 
 /* Be cafeul not to call this without setting the data bus direction first. */
 uint16_t read_eprom(uint32_t addr) {
     set_address(addr);
-    delay(1);
+    _delay_us(100);
     digitalWrite(EPROM_CE, LOW);
-    delay(1);
+    _delay_us(100);
     digitalWrite(EPROM_OE, LOW);
-    delay(1);
+    _delay_us(100);
     uint16_t d = data_bus_value();
   
     digitalWrite(EPROM_CE, HIGH);
@@ -154,7 +225,9 @@ void doReadCmd() {
   Serial.println(len, DEC);  
   
   data_bus_direction(DATA_IN);
-  
+  delay(1);
+
+  led_on();
   for (uint32_t addr = start; addr < start + len; addr++) {
     uint16_t val = read_eprom(addr);
 
@@ -162,6 +235,7 @@ void doReadCmd() {
     Serial.print(": ");
     Serial.println(val, HEX);
   }    
+  led_off();
 }
 
 void doWriteCmd() {
@@ -175,12 +249,19 @@ void doWriteCmd() {
   data_bus_direction(DATA_OUT);
   digitalWrite(EPROM_VCC, HIGH);
   digitalWrite(EPROM_VPP, HIGH);
-  delay(10);
+
+  // Wait for VPP to reach the target 12.5V
+  float voltage = getVppVoltage();
+  while (voltage < 12.4 || voltage > 12.6) {
+    delay(1);
+    voltage = getVppVoltage();
+  }
+  
   set_address(addr);
   data_bus_write(value);
 
   // Wait for tAS, tDS, tVPS, tVCS (uS)
-  _delay_us(10);
+  _delay_us(100);
 
   // Pulse CE for exactly 50uS
   digitalWrite(EPROM_CE, LOW);
@@ -188,12 +269,19 @@ void doWriteCmd() {
   digitalWrite(EPROM_CE, HIGH);
 
   // Wait for tDH (data hold time)
-  _delay_us(2);
+  _delay_us(100);
 
   // Can now lower programming voltages and let them settle
   digitalWrite(EPROM_VPP, LOW);
   digitalWrite(EPROM_VCC, LOW);
-  delay(100); 
+
+  // Wait for programming voltage to dissipate
+  voltage = getVppVoltage();
+  while (voltage > 0.1) {
+    delay(1);
+    voltage = getVppVoltage();
+  }
+  data_bus_direction(DATA_IN);
 }
 
 uint8_t getDataBuffer(uint16_t size) {
@@ -201,6 +289,8 @@ uint8_t getDataBuffer(uint16_t size) {
   uint16_t bytecount = 0;
   uint16_t lastbyte;
   uint16_t timeout = 0;
+
+  led_on();
   while (1) {
     if (Serial.available()) {
       timeout = 0;
@@ -213,16 +303,18 @@ uint8_t getDataBuffer(uint16_t size) {
       }
       
       if (dataused == DATALEN || dataused == size) {
+        led_off();
         return 0;
       }
     } else {
       delay(10);
       if (timeout++ == 1000) {
         dataused = 0;
+        led_off();
         return 1;
       }
     }
-  }  
+  }
 }
 
 void doBufferCmd() {
@@ -258,13 +350,19 @@ void doProgramCmd() {
   digitalWrite(EPROM_VCC, HIGH);
   digitalWrite(EPROM_VPP, HIGH);
   delay(10);
+  // Wait for VPP to reach the target 12.5V
+  float voltage = getVppVoltage();
+  while (voltage < 12.4 || voltage > 12.6) {
+    delay(1);
+    voltage = getVppVoltage();
+  }
 
   for (uint32_t count = 0; count < size; count++) {
     set_address(addr + count);
     data_bus_write(databuf[count]);
   
     // Wait for tAS, tDS, tVPS, tVCS (uS)
-    _delay_us(10);
+    _delay_us(100);
   
     // Pulse CE for exactly 50uS
     digitalWrite(EPROM_CE, LOW);
@@ -272,13 +370,23 @@ void doProgramCmd() {
     digitalWrite(EPROM_CE, HIGH);
   
     // Wait for tDH (data hold time)
-    _delay_us(2);
+    _delay_us(100);
   }
 
   // Can now lower programming voltages and let them settle
   digitalWrite(EPROM_VPP, LOW);
   digitalWrite(EPROM_VCC, LOW);
-  delay(100); 
+
+  delay(10);
+  
+  // Wait for programming voltage to dissipate
+  voltage = getVppVoltage();
+  while (voltage > 0.1) {
+    delay(1);
+    voltage = getVppVoltage();
+  }
+  
+  data_bus_direction(DATA_IN);
 }
 
 // This algorithm doesn't seem to match anything online, but I couldn't figure out what the difference is.
@@ -316,6 +424,41 @@ void doCRCCmd() {
   Serial.println(crc, HEX);
 }
 
+void doBufCRCCmd() {
+  uint32_t size = getCmdAddr(cmdptr);
+
+  uint16_t crc = 0;
+  for (uint32_t addr = 0; addr < size; addr++) {
+    uint16_t operand = databuf[addr];
+    crc = crc16(crc, operand >> 8);
+    crc = crc16(crc, operand & 0xff);
+  }
+  
+  Serial.print("# BUFCRC ");
+  Serial.print(size);
+  Serial.print(" ");
+  Serial.println(crc, HEX);
+}
+
+uint16_t bit_lookup[16] = {
+  (1 << 0),
+  (1 << 1),
+  (1 << 2),
+  (1 << 3),
+  (1 << 4),
+  (1 << 5),
+  (1 << 6),
+  (1 << 7),
+  (1 << 8),
+  (1 << 9),
+  (1 << 10),
+  (1 << 11),
+  (1 << 12),
+  (1 << 13),
+  (1 << 14),
+  (1 << 15),
+};
+
 void doCheckBlankCmd() {
   uint32_t size = getCmdAddr(cmdptr);
 
@@ -329,7 +472,7 @@ void doCheckBlankCmd() {
 
     // Count non-blank bits
     for (uint8_t bit = 0; bit < 16; bit++) {
-      if (~operand & (1<<bit)) {
+      if (~operand & bit_lookup[bit]) {
         bits++;
       }
     }
@@ -388,6 +531,26 @@ void getCommand() {
   cmdptr = 0;
 }
 
+void doTestVpp() {
+  float temp;
+  
+  Serial.println("# TEST VPP");
+  uint16_t log[128];
+  digitalWrite(EPROM_VPP, LOW);
+  delay(50);
+  Serial.print("Low voltage: ");
+  Serial.print(getVppVoltage());
+  Serial.println(" V");
+
+  digitalWrite(EPROM_VPP, HIGH);
+  delay(50);
+
+  Serial.print("High voltage: ");
+  Serial.print(getVppVoltage());
+  Serial.println(" V");
+
+  digitalWrite(EPROM_VPP, LOW);
+}
 
 void doCommand() {
   switch (cmdbuf[0]) {
@@ -416,6 +579,10 @@ void doCommand() {
       cmdptr++;
       doCRCCmd();
       break;
+    case 'h':
+      cmdptr++;
+      doBufCRCCmd();
+      break;      
     case 'l':
       cmdptr++;
       doCheckBlankCmd();
@@ -428,6 +595,12 @@ void doCommand() {
       cmdptr++;
       doDebugCmd();
       break;
+
+    // Test VPP voltage envelope
+    case 'v':
+      doTestVpp();
+      break;
+      
     default:
       Serial.print("Command ");
       Serial.print(cmdbuf[0]);
@@ -440,89 +613,4 @@ void loop() {
   Serial.println("?");
   getCommand();
   doCommand();
-  
-
-  // Read contents of ROM at address 
-/*
-  Serial.println("Begin");
-  long int addr_max = (long int)256 * 1024;
-
-  for (long int addr = 0; addr < addr_max; addr++) {
-    set_address(addr);
-    delay(1);
-    digitalWrite(EPROM_CE, LOW);
-    delay(1);
-    digitalWrite(EPROM_OE, LOW);
-    delay(1);
-    unsigned int d = data_bus_value();
-  
-    digitalWrite(EPROM_CE, HIGH);
-    digitalWrite(EPROM_OE, HIGH);
-
-    if (d != 0xffff) {
-      Serial.print(addr, HEX);
-      Serial.print(": ");
-      Serial.println(d, HEX);
-    }
-
-    if (addr % 1024 == 0) {
-      Serial.print("... ");
-      Serial.println(addr, HEX);
-    }
-  }  
-  Serial.println("End");
-*/
-
-  /* Program bit 0 to all zeroes */
-  /*
-  Serial.println("Writing");
-  delay(100);
-  data_bus_direction(DATA_OUT);
-  digitalWrite(EPROM_VCC, HIGH);
-  delay(100);
-  digitalWrite(EPROM_VPP, HIGH);
-  set_address(5);
-  data_bus_write(0xdb7e);
-
-  _delay_us(1000);
-  digitalWrite(EPROM_CE, LOW);
-  _delay_us(50);
-  digitalWrite(EPROM_CE, HIGH);
-  delay(100);
-  
-  digitalWrite(EPROM_VPP, LOW);
-  delay(100);
-  digitalWrite(EPROM_VCC, LOW);
-
-  delay(100);
-*/
-/*
-  Serial.println("Read back");
-  data_bus_direction(INPUT);
-  
-  long int addr_max = (long int)256 * 1024;
-
-  for (long int addr = 0; addr < 16; addr++) {
-    set_address(addr);
-    delay(1);
-    digitalWrite(EPROM_CE, LOW);
-    delay(1);
-    digitalWrite(EPROM_OE, LOW);
-    delay(1);
-    unsigned int d = data_bus_value();
-  
-    digitalWrite(EPROM_CE, HIGH);
-    digitalWrite(EPROM_OE, HIGH);
-
-    Serial.print(addr, HEX);
-    Serial.print(": ");
-    Serial.println(d, HEX);
-  }  
-  Serial.println("End");
-  
-  while(1) {
-  }
-*/
-
-
 }

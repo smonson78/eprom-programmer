@@ -220,7 +220,7 @@ void do_program(uint32_t addr, uint32_t size) {
     }
 }
 
-// Program from buffer to EPROM, size is in words
+// Get CRC of EPROM block, size is in words
 uint16_t do_crc(uint32_t addr, uint32_t size) {
     /* Send buffer command */
     char buf[32];
@@ -244,6 +244,38 @@ uint16_t do_crc(uint32_t addr, uint32_t size) {
 
     if (response_addr != addr || response_size != size) {
         fprintf(stderr, "CRC command returned incorrect result: [%s]\n", input_buf);
+        exit(1);      
+    }
+
+    get_response(200);   
+   
+    if (strcmp(input_buf, "?") != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+    return response_crc;
+}
+
+// Get CRC of data buffer, size is in words
+uint16_t do_buffer_crc(uint32_t size) {
+    /* Send buffer command */
+    char buf[32];
+    sprintf(buf, "h %d", size);
+    send_command((const char *)buf);
+
+    if (strncmp(input_buf, "# BUFCRC ", 9) != 0) {
+        fprintf(stderr, "Unexpected response: [%s]\n", input_buf);
+        exit(1);      
+    }
+    char *next = input_buf + 9;
+    uint32_t response_size = strtol(next, &next, 10);
+    while (*next == ' ') {
+        next++;
+    }
+    uint32_t response_crc = strtol(next, 0, 16);
+
+    if (response_size != size) {
+        fprintf(stderr, "BUFCRC command returned incorrect result: [%s]\n", input_buf);
         exit(1);      
     }
 
@@ -298,10 +330,28 @@ void write_from_file(const char *filename) {
         }
 
         uint16_t block_crc = calc_crc16(file_buf, block_size);
-
         do_buffer(file_buf, num_words);
-        do_program(addr_words, num_words);
-        uint16_t crc = do_crc(addr_words, num_words);
+        uint16_t buffer_crc = do_buffer_crc(num_words);
+        // Transmit the block of data until the programmer reports the correct CRC value
+        while (buffer_crc != block_crc) {
+            fprintf(stderr, "Mismatching CRC16: %04x (data buffer) vs %04x (file) - retrying...\n", buffer_crc, block_crc);
+            do_buffer(file_buf, num_words);
+            buffer_crc = do_buffer_crc(num_words);
+        }
+
+        // Try programming it into the EEPROM
+        int retries = 0;
+        uint16_t crc;
+        while (retries < 3) {
+            do_program(addr_words, num_words);
+            crc = do_crc(addr_words, num_words);
+            if (crc == block_crc) {
+                break;
+            }
+            fprintf(stderr, "Mismatching CRC16: %04x (EPROM) vs %04x (file) - retrying...\n", crc, block_crc);
+            retries++;
+        }
+
         if (crc != block_crc) {
             fprintf(stderr, "Mismatching CRC16: %04x (EPROM) vs %04x (file)\n", crc, block_crc);
             exit(1);
@@ -472,7 +522,7 @@ int main(int argc, char **argv)
     // Set up port parameters
     sp_port_config_t *conf;
     result = sp_new_config(&conf);
-    result = result == SP_OK ? sp_set_config_baudrate(conf, 19200) : result;
+    result = result == SP_OK ? sp_set_config_baudrate(conf, 57600) : result;
     result = result == SP_OK ? sp_set_config_parity(conf, SP_PARITY_NONE) : result;
     result = result == SP_OK ? sp_set_config_bits(conf, 8) : result;
     result = result == SP_OK ? sp_set_config_stopbits(conf, 1) : result;
