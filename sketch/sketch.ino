@@ -60,10 +60,12 @@ void setup() {
   pinMode(A9, OUTPUT);
   pinMode(A10, OUTPUT);
   pinMode(A11, OUTPUT);
-  pinMode(A12, OUTPUT);
+  //pinMode(A12, OUTPUT); // faulty on my mega board, I think
   pinMode(A13, OUTPUT);
   pinMode(A14, OUTPUT);
   pinMode(A15, OUTPUT);
+
+  pinMode(A7, OUTPUT); // to replace A4
   
   //}
   // Upper lines
@@ -153,6 +155,9 @@ void set_address(uint32_t addr) {
 
   // a0 - a7
   PORTK = addr & 0xff;
+
+  // to patch faulty pin A4
+  digitalWrite(A7, addr & (1 << 4) ? HIGH : LOW);
 }
 
 unsigned int data_bus_value() {
@@ -500,6 +505,19 @@ void doDebugCmd() {
     Serial.print(": ");
     Serial.println(databuf[i], 16);
   }
+ 
+  data_bus_direction(DATA_IN);
+  delay(1);
+
+  led_on();
+  uint16_t manufacturer = read_eprom(addr);
+  uint16_t device = read_eprom(addr);
+  led_off();
+
+  Serial.print("Device code: ");
+  Serial.println(device, HEX);
+
+
 }
 
 
