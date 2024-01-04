@@ -61,11 +61,12 @@ void setup() {
   pinMode(A10, OUTPUT);
   pinMode(A11, OUTPUT);
   //pinMode(A12, OUTPUT); // faulty on my mega board, I think
+  // I patched this on the board using a physical wire. The original design used A12. 
+  // The patched board uses A7 for the same purpose.
+  pinMode(A7, OUTPUT); // to replace A4 (AKA pin A12)
   pinMode(A13, OUTPUT);
   pinMode(A14, OUTPUT);
   pinMode(A15, OUTPUT);
-
-  pinMode(A7, OUTPUT); // to replace A4
   
   //}
   // Upper lines
@@ -134,7 +135,7 @@ void data_bus_direction(data_bus_direction_t dir) {
 }
 
 void set_address(uint32_t addr) {
-  uint32_t new_addr_page = addr >> 8;
+   uint32_t new_addr_page = (uint32_t)addr >> 8;
 
   // Change to a new page if needed
   //if (new_addr_page != addr_page) {
@@ -145,10 +146,11 @@ void set_address(uint32_t addr) {
     digitalWrite(49, addr & (1 << 12) ? HIGH : LOW);
     digitalWrite(48, addr & (1 << 13) ? HIGH : LOW);
     digitalWrite(47, addr & (1 << 14) ? HIGH : LOW);
-    digitalWrite(46, addr & (1 << 15) ? HIGH : LOW);
-    digitalWrite(45, addr & (1 << 16) ? HIGH : LOW);
-    digitalWrite(44, addr & (1 << 17) ? HIGH : LOW);
-    // TODO make this into a loop
+    // Cast is necessary to avoid truncating to a 16-bit int.
+    digitalWrite(46, addr & ((uint32_t)1 << 15) ? HIGH : LOW);
+    digitalWrite(45, addr & ((uint32_t)1 << 16) ? HIGH : LOW);
+    digitalWrite(44, addr & ((uint32_t)1 << 17) ? HIGH : LOW);
+    // TODO make this into a loop. This will also remove the need for a cast.
     
     addr_page = new_addr_page;
   //}
@@ -156,7 +158,7 @@ void set_address(uint32_t addr) {
   // a0 - a7
   PORTK = addr & 0xff;
 
-  // to patch faulty pin A4
+  // to patch faulty pin A4 on my board. Not needed for the board as designed.
   digitalWrite(A7, addr & (1 << 4) ? HIGH : LOW);
 }
 
@@ -508,16 +510,6 @@ void doDebugCmd() {
  
   data_bus_direction(DATA_IN);
   delay(1);
-
-  led_on();
-  uint16_t manufacturer = read_eprom(addr);
-  uint16_t device = read_eprom(addr);
-  led_off();
-
-  Serial.print("Device code: ");
-  Serial.println(device, HEX);
-
-
 }
 
 
